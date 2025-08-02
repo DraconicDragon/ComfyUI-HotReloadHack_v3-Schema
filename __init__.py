@@ -10,6 +10,7 @@ import logging
 import requests
 import threading
 import importlib
+import asyncio
 from collections import defaultdict
 
 from watchdog.observers import Observer
@@ -28,7 +29,7 @@ RELOADED_CLASS_TYPES: dict = {}  # Stores types of classes that have been reload
 CUSTOM_NODE_ROOT: list[str] = folder_paths.folder_names_and_paths["custom_nodes"][0]  # Custom Node root directory list.
 
 # Set of modules to exclude from reloading.
-EXCLUDE_MODULES: set[str] = {'ComfyUI-Manager', 'ComfyUI-HotReloadHack'}
+EXCLUDE_MODULES: set[str] = {'ComfyUI-Manager', 'ComfyUI-HotReloadHack', 'rgthree-comfy'}
 if (HOTRELOAD_EXCLUDE := os.getenv("HOTRELOAD_EXCLUDE", None)) is not None:
     EXCLUDE_MODULES.update(x for x in HOTRELOAD_EXCLUDE.split(',') if x)
 
@@ -139,7 +140,7 @@ class DebouncedHotReloader(FileSystemEventHandler):
         self.__hashes: dict[str, str] = {}
         self.__lock: threading.Lock = threading.Lock()
 
-    def __reload(self, module_name: str) -> web.Response:
+    async def __reload(self, module_name: str) -> web.Response:
         """
         Reloads all relevant modules and clears caches.
 
@@ -174,7 +175,7 @@ class DebouncedHotReloader(FileSystemEventHandler):
                 return web.Response(text='FAILED')
 
             module_path: str = os.path.join(CUSTOM_NODE_ROOT[0], module_name)
-            load_custom_node(module_path)
+            await load_custom_node(module_path)
             return web.Response(text='OK')
 
     def on_modified(self, event):
@@ -236,7 +237,7 @@ class DebouncedHotReloader(FileSystemEventHandler):
                 return
 
         try:
-            self.__reload(module_name)
+            asyncio.run(self.__reload(module_name))
             logging.info(f'[ComfyUI-HotReloadHack] Reloaded module {module_name}')
         except requests.RequestException as e:
             logging.error(f"Error calling reload for module {module_name}: {e}")
