@@ -10,6 +10,7 @@ import logging
 import requests
 import threading
 import importlib
+import inspect
 import asyncio
 from collections import defaultdict
 
@@ -140,6 +141,48 @@ class DebouncedHotReloader(FileSystemEventHandler):
         self.__hashes: dict[str, str] = {}
         self.__lock: threading.Lock = threading.Lock()
 
+    @staticmethod
+    def _node_id_from_class(node_cls) -> str | None:
+        """Return a schema node id for the given node class or None on failure."""
+        try:
+            schema = node_cls.define_schema()
+            return schema.node_id
+        except Exception:  # pylint: disable=broad-except
+            logging.debug("Unable to build schema for %s", getattr(node_cls, '__name__', node_cls), exc_info=True)
+            return None
+
+    async def _collect_node_ids(self, module) -> set[str]:
+        """Gather all node ids exposed by the module under either schema."""
+        node_ids: set[str] = set()
+        legacy_mapping = getattr(module, "NODE_CLASS_MAPPINGS", None)
+        if legacy_mapping:
+            node_ids.update(legacy_mapping.keys())
+
+        comfy_nodes = getattr(module, "COMFY_NODES", None)
+        if comfy_nodes:
+            for node_cls in comfy_nodes:
+                node_id = self._node_id_from_class(node_cls)
+                if node_id:
+                    node_ids.add(node_id)
+
+        entrypoint = getattr(module, "comfy_entrypoint", None)
+        if entrypoint:
+            try:
+                extension = entrypoint()
+                if inspect.isawaitable(extension):
+                    extension = await extension
+                if extension:
+                    node_list = extension.get_node_list()
+                    if inspect.isawaitable(node_list):
+                        node_list = await node_list
+                    for node_cls in node_list or []:
+                        node_id = self._node_id_from_class(node_cls)
+                        if node_id:
+                            node_ids.add(node_id)
+            except Exception:  # pylint: disable=broad-except
+                logging.warning("Failed to gather nodes from comfy_entrypoint", exc_info=True)
+        return node_ids
+
     async def __reload(self, module_name: str) -> web.Response:
         """
         Reloads all relevant modules and clears caches.
@@ -168,7 +211,7 @@ class DebouncedHotReloader(FileSystemEventHandler):
             try:
                 sys.modules[module_name] = module
                 spec.loader.exec_module(module)
-                for key in module.NODE_CLASS_MAPPINGS.keys():
+                for key in await self._collect_node_ids(module):
                     RELOADED_CLASS_TYPES[key] = 3
             except Exception as e:
                 logging.error(f"Failed to reload module {module_name}: {e}")
